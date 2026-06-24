@@ -1,0 +1,3 @@
+name: kanban-projects
+version: 0.2.0
+description: Project-grouped Kanban view with per-project goals, objectives, triage, and Obsidian links.

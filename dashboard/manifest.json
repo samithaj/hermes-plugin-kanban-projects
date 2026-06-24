@@ -1,0 +1,13 @@
+{
+  "name": "kanban-projects",
+  "label": "Kanban Projects",
+  "description": "Project-path grouped Hermes Kanban view with per-project goals, objectives, triage, and Obsidian note links.",
+  "icon": "FolderKanban",
+  "version": "0.2.0",
+  "tab": {
+    "path": "/kanban-projects",
+    "position": "after:kanban"
+  },
+  "entry": "dist/index.js",
+  "css": "dist/style.css"
+}
