@@ -187,21 +187,24 @@
 
     function parseSessionSignals(task) {
       const body = String((task && task.body) || "");
-      const state = lineValue(body, "- State").replace(/`/g, "") || String(task.status || task._column || "");
+      const stateMatch = body.match(/State:\s*`?([^`\n·]+)`?/i);
+      const state = String((stateMatch && stateMatch[1]) || task.status || task._column || "").trim().replace(/`/g, "");
+      const status = String(task.status || task._column || "").trim();
       let process = "";
       const processMatch = body.match(/Process:\s*`?([^`\n·]+)`?/i);
       if (processMatch) process = processMatch[1].trim();
       const waiting = (body.match(/Waiting:\s*`?([^`\n·]+)`?/i) || [])[1] || "";
       const needs = lineValue(body, "- Needs") || lineValue(body, "Needs");
-      const needsMe = !!(String(waiting).trim() || String(needs).trim() || (state === "blocked" && process !== "busy"));
+      const blocked = state === "blocked" || status === "blocked";
+      const needsMe = !!(String(waiting).trim() || String(needs).trim() || (blocked && process !== "busy"));
       return {
         state: state,
         process: process,
         waiting: String(waiting || "").trim(),
         needs: String(needs || "").trim(),
         needsMe: needsMe,
-        working: process === "busy" || state === "working" || task.status === "running",
-        done: state === "done" || task.status === "done" || task.status === "archived",
+        working: process === "busy" || state === "working" || status === "running",
+        done: state === "done" || status === "done" || status === "archived",
       };
     }
 
