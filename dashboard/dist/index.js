@@ -527,7 +527,7 @@
 
     function warpOpen(job) { return WARP + "/open/" + encodeURIComponent(job); }
     function warpCompose(job, text) {
-      return WARP + "/compose/" + encodeURIComponent(job) + (text ? "?text=" + encodeURIComponent(text) : "");
+      return WARP + "/send/" + encodeURIComponent(job) + (text ? "?text=" + encodeURIComponent(text) : "");
     }
     function openUrl(url) { try { window.open(url, "_blank", "noopener"); } catch (_e) {} }
 
@@ -841,10 +841,10 @@
         setDetails(goal ? goal.body : "");
       }, [goal && goal.id, goal && goal.body]);
 
-      const canSend = props.composeLinks && !!job;
+      const canSend = !!job;
       function send(value) {
         const v = (value != null ? value : text).trim();
-        if (!canSend) return;
+        if (!canSend || !v) return;
         openUrl(warpCompose(job, v));
       }
 
@@ -1039,7 +1039,7 @@
             h("button", {
               className: "mc-send",
               disabled: !canSend || !text.trim(),
-              title: !job ? "No Warp session id for this agent" : (!props.composeLinks ? "Turn on Compose links in the top bar to send" : "Open this prompt in Warp"),
+              title: !job ? "No Warp session id for this agent" : "Send this prompt to the existing Warp/Claude tab",
               onClick: function () { send(); },
             }, "Send to Claude")
           ),
