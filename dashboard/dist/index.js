@@ -1039,7 +1039,7 @@
             h("button", {
               className: "mc-send",
               disabled: !canSend || !text.trim(),
-              title: !job ? "No Warp session id for this agent" : "Send this prompt to the existing Warp/Claude tab",
+              title: !job ? "No Warp session id for this agent" : "Open Warp if needed, then send this prompt to Claude",
               onClick: function () { send(); },
             }, "Send to Claude")
           ),
