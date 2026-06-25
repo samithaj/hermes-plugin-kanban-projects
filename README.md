@@ -39,3 +39,19 @@ If migrating from a manual drop, back up/remove `~/.hermes/plugins/kanban-projec
 The shipped artifact is `dashboard/dist/index.js` and `dashboard/dist/style.css`.
 
 No custom backend is required or supported for this plugin.
+## Operational scripts
+
+The live Sam/Warp/Claude dashboard workflow also uses the scripts in `scripts/`:
+
+- `scripts/sync_claude_kanban.py` mirrors `claude agents --json --all` into the `claude-code-work` Kanban board, including plain interactive sessions whose Agent View `id` is null by falling back to their full `sessionId`.
+- `scripts/warp_kanban_bridge.py` runs the localhost Warp bridge on `127.0.0.1:9777` for `Open in Warp`, `Send to Claude`, and `Compose`. It uses CuaDriver for typing, restores the wrapper launcher fallback for opening, and refuses to type prompts unless a live Claude focus target is confirmed.
+
+To sync this repository copy to the running Hermes profile:
+
+```bash
+cp scripts/sync_claude_kanban.py ~/.hermes/scripts/sync_claude_kanban.py
+cp scripts/warp_kanban_bridge.py ~/.hermes/scripts/warp_kanban_bridge.py
+python3 -m py_compile ~/.hermes/scripts/sync_claude_kanban.py ~/.hermes/scripts/warp_kanban_bridge.py
+python3 ~/.hermes/scripts/sync_claude_kanban.py
+```
+
