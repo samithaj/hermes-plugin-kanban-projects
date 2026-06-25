@@ -495,18 +495,19 @@ def _cua_key_warp(key: str) -> None:
 
 
 def _attach_or_resume_cmd(job_id: str) -> str:
-    """Pick the right Warp command for this session.
+    """Pick the right Warp command for the legacy wrapper fallback.
 
-    A live Agent-View job is reattached with `claude attach <job>`. A
-    failed/done/stopped session CANNOT be attached ("can't start"), but if it
-    has a saved transcript it can be resumed into a fresh live session with
-    `claude --resume <full-session-id>`. Resume is what unblocks the
-    "session is failed" dead-end.
+    Keep this aligned with `_claude_open_command`: live Agent View jobs attach
+    by short id; terminal jobs with a real transcript resume by full session id;
+    failed metadata-only jobs are not resumable, so start a fresh Claude instead
+    of opening a doomed `--resume` tab.
     """
     state, _detail = _session_terminal_state(job_id)
     resume_id = _session_resume_id(job_id)
-    if state in ("failed", "done", "stopped") and resume_id:
-        return f"{CLAUDE_BIN} --resume {shlex_quote(resume_id)}"
+    if state in ("failed", "done", "stopped"):
+        if resume_id and _session_has_real_transcript(job_id):
+            return f"{CLAUDE_BIN} --resume {shlex_quote(resume_id)}"
+        return CLAUDE_BIN
     return f"{CLAUDE_BIN} attach {shlex_quote(job_id)}"
 
 
