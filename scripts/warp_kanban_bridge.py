@@ -417,25 +417,58 @@ def _session_has_real_transcript(job_id: str) -> bool:
     return False
 
 
+def _session_at_permission_gate(job_id: str) -> bool:
+    """True if the LIVE session is parked on a permission/trust/elicitation gate
+    rather than the normal conversation input.
+
+    Pressing Enter at such a gate selects the highlighted option (e.g. "Yes,
+    trust this folder" / "Allow tool"), so the send path must never auto-submit
+    into it. A plain "needs your reply" wait (the agent asked a question) is NOT
+    a gate and is fine to answer. Reads `claude agents --json --all` because
+    status/waitingFor live there, not in state.json.
+    """
+    try:
+        out = subprocess.run(
+            [CLAUDE_BIN, "agents", "--json", "--all"],
+            capture_output=True, text=True, timeout=15,
+        ).stdout
+        for e in json.loads(out):
+            if e.get("id") != job_id:
+                continue
+            wf = str(e.get("waitingFor") or "").lower()
+            st = str(e.get("status") or "").lower()
+            gate_words = ("permission", "trust", "approve", "allow", "elicit", "tool use")
+            return any(w in wf for w in gate_words) or st in ("permission", "elicitation")
+    except Exception:
+        pass
+    return False
+
+
 def _refuse_terminal_session(job_id: str) -> tuple[int, str] | None:
+    """Refuse a send only when the session truly cannot receive the message.
+
+    Reconciled with _claude_open_command, which now resumes ANY terminal state
+    (failed/done/stopped) that has a real transcript, and starts a fresh
+    summary-seeded session for *failed* jobs whose transcript is empty. So the
+    only thing left to refuse is a done/stopped job with no resumable
+    transcript — there we should NOT silently fresh-spawn a finished task.
+    """
     state, detail = _session_terminal_state(job_id)
     resume_id = _session_resume_id(job_id)
-    hard_failed = state == "failed" and (
-        not resume_id
-        or "SIGKILL" in detail
-        or "before init" in detail
-        or "spawn" in detail.lower() and "failed" in detail.lower()
-    )
-    if state == "done" or hard_failed:
-        return 409, json.dumps({
-            "ok": False,
-            "error": f"session is {state}; not sending to Claude",
-            "job_id": job_id,
-            "detail": detail,
-            "resume_id": resume_id,
-            "hint": "Start or select a live/waiting Claude session; this job cannot be attached/resumed.",
-        })
-    return None
+    if state not in ("failed", "done", "stopped"):
+        return None
+    if resume_id and _session_has_real_transcript(job_id):
+        return None  # resumable → allow (claude --resume)
+    if state == "failed":
+        return None  # non-resumable failure → fresh session seeded with summary
+    return 409, json.dumps({
+        "ok": False,
+        "error": f"session is {state} with no resumable transcript; not sending to Claude",
+        "job_id": job_id,
+        "detail": detail,
+        "resume_id": resume_id,
+        "hint": "Nothing to resume for this finished session. Start a new session instead.",
+    })
 
 
 def _claude_open_command(job_id: str, initial_text: str | None = None) -> tuple[str, bool, str | None]:
@@ -450,15 +483,19 @@ def _claude_open_command(job_id: str, initial_text: str | None = None) -> tuple[
     """
     state, detail = _session_terminal_state(job_id)
     resume_id = _session_resume_id(job_id)
-    if state == "failed" and resume_id and _session_has_real_transcript(job_id):
+    # done/stopped/failed sessions can't be `claude attach`ed ("can't start").
+    # Resume them into a live session when there's a real transcript; otherwise
+    # start a fresh session seeded with the saved summary.
+    terminal = state in ("failed", "done", "stopped")
+    if terminal and resume_id and _session_has_real_transcript(job_id):
         return f"{CLAUDE_BIN} --resume {shlex_quote(resume_id)}", False, None
-    if state == "failed":
+    if terminal:
         prompt = (initial_text or "").strip()
         summary = detail.strip()
         combined = prompt
         if summary:
             combined = (
-                f"Previous failed Agent View session {job_id} could not be resumed. Saved summary:\n"
+                f"Previous {state} Agent View session {job_id} could not be resumed. Saved summary:\n"
                 f"{summary}\n\nUser prompt:\n{prompt}"
             )
         return CLAUDE_BIN, True, combined
@@ -627,11 +664,28 @@ def _focus_and_inject(job_id: str, text: str, *, submit: bool) -> tuple[int, str
             })
         _focus_warp(focus)
         time.sleep(0.45)
+        # Permission/trust-gate guard: only press Enter when we're confident
+        # Claude is at the conversation input. A freshly-opened tab may sit on a
+        # startup gate (trust-folder, theme, resume-loading) and a live session
+        # may be parked on a permission/elicitation prompt — in both cases the
+        # trailing Enter would SELECT the highlighted option (e.g. auto-trust the
+        # folder / allow a tool). So we type the text as a draft but withhold
+        # Enter, and tell the caller to review and submit manually.
+        gate_reason = ""
+        if opened:
+            gate_reason = "tab just opened — Claude may be on a startup/trust prompt"
+        elif _session_at_permission_gate(job_id):
+            gate_reason = "session is on a permission/approval prompt"
+        do_submit = submit and not gate_reason
         try:
             _cua_type_warp(text)
-            if submit:
+            if do_submit:
                 _cua_key_warp("return")
-            return 200, json.dumps({"ok": True, "job_id": job_id, "submitted": submit, "opened": opened, "driver": "cua-driver"})
+            resp = {"ok": True, "job_id": job_id, "submitted": do_submit, "opened": opened, "driver": "cua-driver"}
+            if submit and not do_submit:
+                resp["drafted"] = True
+                resp["note"] = f"typed as draft, not auto-submitted: {gate_reason}. Review Claude in Warp and press Enter to send."
+            return 200, json.dumps(resp)
         except Exception as exc:
             return 500, json.dumps({
                 "ok": False,
