@@ -1,0 +1,403 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>kanban-projects + Warp bridge — how it works</title>
+<style>
+  :root{
+    --bg:#0b1120; --panel:#111b2e; --panel2:#0e1726; --ink:#e6edf6; --mut:#93a4bd;
+    --line:#23324d; --teal:#2dd4bf; --teal-dim:#0f766e;
+    --amber:#fbbf24; --red:#f87171; --blue:#60a5fa; --violet:#a78bfa; --green:#34d399;
+    --code:#0a1424;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{
+    margin:0;background:radial-gradient(1200px 700px at 70% -10%,#13243f 0,var(--bg) 55%) fixed;
+    color:var(--ink);font:16px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    -webkit-font-smoothing:antialiased;
+  }
+  .wrap{max-width:1040px;margin:0 auto;padding:40px 22px 90px}
+  header.hero{padding:18px 0 8px;border-bottom:1px solid var(--line);margin-bottom:30px}
+  .kicker{color:var(--teal);font:700 12px/1 ui-monospace,Menlo,Consolas,monospace;letter-spacing:.18em;text-transform:uppercase}
+  h1{font-size:30px;margin:.35em 0 .1em;letter-spacing:-.01em}
+  h2{font-size:21px;margin:2.2em 0 .6em;padding-top:.3em;border-top:1px solid var(--line)}
+  h2 .n{color:var(--teal-dim);font:700 14px/1 ui-monospace,monospace;margin-right:.5em}
+  h3{font-size:16px;margin:1.4em 0 .4em;color:var(--teal)}
+  p{color:var(--ink)}
+  .lede{color:var(--mut);font-size:17px;max-width:74ch}
+  a{color:var(--teal)}
+  code,kbd{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:.86em}
+  p code,li code,td code{background:var(--code);border:1px solid var(--line);border-radius:5px;padding:.06em .4em;color:#cfe9ff}
+  .mut{color:var(--mut)}
+  .grid{display:grid;gap:14px}
+  @media(min-width:720px){.cols-2{grid-template-columns:1fr 1fr}.cols-3{grid-template-columns:1fr 1fr 1fr}}
+  .card{background:linear-gradient(180deg,var(--panel),var(--panel2));border:1px solid var(--line);border-radius:12px;padding:16px 18px}
+  .card h3{margin-top:0}
+  .pill{display:inline-block;font:600 11px/1.4 ui-monospace,monospace;padding:.2em .55em;border-radius:999px;border:1px solid var(--line);color:var(--mut);background:#0d1830}
+  .pill.port{color:var(--teal);border-color:var(--teal-dim)}
+  .pill.warn{color:var(--amber);border-color:#7c5a12}
+  figure{margin:18px 0 6px}
+  figure svg{width:100%;height:auto;background:#0a1322;border:1px solid var(--line);border-radius:14px}
+  figcaption{color:var(--mut);font-size:13px;margin-top:8px;text-align:center}
+  ol.steps{counter-reset:s;list-style:none;padding:0;margin:0}
+  ol.steps>li{position:relative;padding:12px 14px 12px 52px;margin:10px 0;background:var(--panel2);border:1px solid var(--line);border-radius:10px}
+  ol.steps>li::before{counter-increment:s;content:counter(s);position:absolute;left:12px;top:12px;width:26px;height:26px;border-radius:50%;
+    background:var(--teal-dim);color:#eafffb;font:700 13px/26px ui-monospace,monospace;text-align:center}
+  table{width:100%;border-collapse:collapse;margin:8px 0;font-size:14.5px}
+  th,td{text-align:left;padding:9px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{color:var(--teal);font-size:12px;text-transform:uppercase;letter-spacing:.06em}
+  tr:hover td{background:#0d1830}
+  pre{background:var(--code);border:1px solid var(--line);border-radius:10px;padding:14px 16px;overflow:auto;font-size:13px;color:#cfe9ff}
+  .callout{border-left:3px solid var(--teal);background:#0c1a2c;border-radius:0 10px 10px 0;padding:12px 16px;margin:14px 0;color:var(--ink)}
+  .callout.warn{border-left-color:var(--amber);background:#1c160a}
+  .callout.danger{border-left-color:var(--red);background:#1d1010}
+  .legend{display:flex;flex-wrap:wrap;gap:14px;margin:6px 0 0;font-size:12.5px;color:var(--mut)}
+  .legend i{display:inline-block;width:12px;height:12px;border-radius:3px;margin-right:6px;vertical-align:-1px}
+  .toc{display:flex;flex-wrap:wrap;gap:8px;margin:8px 0 0}
+  .toc a{font-size:13px;color:var(--mut);text-decoration:none;border:1px solid var(--line);padding:5px 10px;border-radius:8px;background:#0d1830}
+  .toc a:hover{color:var(--teal);border-color:var(--teal-dim)}
+  footer{margin-top:48px;padding-top:16px;border-top:1px solid var(--line);color:var(--mut);font-size:13px}
+  .small{font-size:13px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="hero">
+  <div class="kicker">Hermes · kanban-projects · Warp bridge</div>
+  <h1>The sound&rarr;navigate attention loop</h1>
+  <p class="lede">A dashboard that watches every Claude Code agent across your machine, surfaces the ones
+  that need you, and lets one click drop you straight into that session in Warp — so nothing idles.</p>
+  <div class="toc">
+    <a href="#loop">The loop</a>
+    <a href="#diagram">Architecture</a>
+    <a href="#components">Components</a>
+    <a href="#data">Data model</a>
+    <a href="#bridge">Warp bridge</a>
+    <a href="#send">Send sequence</a>
+    <a href="#persist">Persistence</a>
+    <a href="#rules">Invariants</a>
+    <a href="#fixes">Recent hardening</a>
+    <a href="#ref">Reference</a>
+  </div>
+</header>
+
+<section id="loop">
+  <h2><span class="n">01</span>The idea in one breath</h2>
+  <p>You run many Claude Code agents at once, in different repos. Some finish, some block on a permission
+  prompt, some quietly idle with no next step. The hard part isn't running them — it's <em>noticing which
+  one needs you</em> and getting back into it fast. This system closes that gap two ways:</p>
+  <div class="grid cols-2">
+    <div class="card"><h3>🔊 The audio half</h3><p class="small">Per-session Claude Code hooks
+      (in <code>~/.hermes/hooks</code>, <em>not</em> this repo) play a repeating sound the moment an agent
+      hits a permission/idle prompt, and stop it when you respond. Your ears are the interrupt.</p></div>
+    <div class="card"><h3>👁️ The visual half (this plugin)</h3><p class="small">A Kanban dashboard grouped by
+      project that ranks every <em>needs‑you</em> session into a triage strip, each with an
+      <strong>Open in Warp</strong> / <strong>Send</strong> button. Your eyes pick the target; one click navigates.</p></div>
+  </div>
+  <p class="small mut">Note: <code>AskUserQuestion</code> fires no hook, so the sound is silent for it — the
+  visual triage strip is the backstop for that gap.</p>
+</section>
+
+<section id="diagram">
+  <h2><span class="n">02</span>Architecture at a glance</h2>
+  <p>Two data planes meet in the dashboard. <strong>Down the middle:</strong> agents → a mirror board → the
+  dashboard (the "what's happening" plane). <strong>Back up the right:</strong> your click → the Warp bridge →
+  Warp → the resumed agent (the "act on it" plane). The big arrow is the loop closing.</p>
+  <figure>
+  <svg viewBox="0 0 980 900" role="img" aria-label="Architecture diagram">
+    <defs>
+      <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+        <path d="M0,0 L10,5 L0,10 z" fill="#5b7299"/>
+      </marker>
+      <marker id="arrT" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+        <path d="M0,0 L10,5 L0,10 z" fill="#2dd4bf"/>
+      </marker>
+      <marker id="arrA" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+        <path d="M0,0 L10,5 L0,10 z" fill="#fbbf24"/>
+      </marker>
+      <style>
+        .b{rx:11;ry:11;stroke-width:1.5}
+        .t{fill:#e6edf6;font:600 14px ui-monospace,Menlo,monospace}
+        .ts{fill:#93a4bd;font:400 11.5px ui-monospace,Menlo,monospace}
+        .lbl{fill:#7f93b3;font:600 11px ui-monospace,Menlo,monospace}
+        .lblt{fill:#2dd4bf;font:600 11px ui-monospace,Menlo,monospace}
+        .flow{stroke:#5b7299;stroke-width:1.8;fill:none;marker-end:url(#arr)}
+        .flowT{stroke:#2dd4bf;stroke-width:2;fill:none;marker-end:url(#arrT)}
+        .flowA{stroke:#fbbf24;stroke-width:1.6;fill:none;stroke-dasharray:5 4;marker-end:url(#arrA)}
+      </style>
+    </defs>
+
+    <!-- CENTRAL PIPELINE -->
+    <!-- A: sessions -->
+    <rect class="b" x="330" y="28" width="320" height="74" fill="#101d33" stroke="#2dd4bf"/>
+    <text class="t" x="490" y="58" text-anchor="middle">Claude Code agent sessions</text>
+    <text class="ts" x="490" y="78" text-anchor="middle">N agents, each in its project cwd</text>
+    <text class="ts" x="490" y="93" text-anchor="middle">~/.claude/jobs · ~/.claude/projects</text>
+
+    <!-- B: sync -->
+    <rect class="b" x="330" y="170" width="320" height="58" fill="#0f1a2e" stroke="#23324d"/>
+    <text class="t" x="490" y="195" text-anchor="middle">sync_claude_kanban.py</text>
+    <text class="ts" x="490" y="214" text-anchor="middle">cron ~60s · writes the mirror</text>
+
+    <!-- C: kanban api/db -->
+    <rect class="b" x="312" y="288" width="356" height="118" fill="#0f1a2e" stroke="#23324d"/>
+    <text class="ts" x="490" y="309" text-anchor="middle">Bundled Kanban API + DB  ·  :9120 /api/plugins/kanban</text>
+    <rect class="b" x="330" y="322" width="150" height="64" fill="#13243f" stroke="#3a4f74"/>
+    <text class="t" x="405" y="348" text-anchor="middle" style="font-size:12.5px">claude-code-work</text>
+    <text class="ts" x="405" y="366" text-anchor="middle">mirror (machine)</text>
+    <rect class="b" x="500" y="322" width="150" height="64" fill="#1a1733" stroke="#5b4f8a"/>
+    <text class="t" x="575" y="348" text-anchor="middle" style="font-size:12.5px">project-goals</text>
+    <text class="ts" x="575" y="366" text-anchor="middle">human-owned</text>
+
+    <!-- D: dashboard -->
+    <rect class="b" x="330" y="470" width="320" height="86" fill="#101d33" stroke="#2dd4bf"/>
+    <text class="t" x="490" y="497" text-anchor="middle">kanban-projects dashboard</text>
+    <text class="ts" x="490" y="516" text-anchor="middle">UI-only plugin · dashboard/dist/index.js</text>
+    <text class="ts" x="490" y="531" text-anchor="middle">triage strip · project groups · goals</text>
+    <text class="ts" x="490" y="546" text-anchor="middle">browser @ :9120/kanban-projects</text>
+
+    <!-- E: bridge -->
+    <rect class="b" x="330" y="624" width="320" height="64" fill="#101d33" stroke="#2dd4bf"/>
+    <text class="t" x="490" y="650" text-anchor="middle">Warp bridge  ·  :9777</text>
+    <text class="ts" x="490" y="669" text-anchor="middle">warp_kanban_bridge.py · /open /compose /send</text>
+
+    <!-- F: cua / launcher -->
+    <rect class="b" x="330" y="724" width="320" height="58" fill="#0f1a2e" stroke="#23324d"/>
+    <text class="t" x="490" y="748" text-anchor="middle" style="font-size:12.5px">CUA-driver  ·  wrapper-launcher (.command)</text>
+    <text class="ts" x="490" y="767" text-anchor="middle">types / launches into a Warp tab</text>
+
+    <!-- G: warp + claude -->
+    <rect class="b" x="330" y="816" width="320" height="62" fill="#101d33" stroke="#34d399"/>
+    <text class="t" x="490" y="842" text-anchor="middle">Warp terminal → claude</text>
+    <text class="ts" x="490" y="861" text-anchor="middle">attach &lt;id&gt;  ·  --resume &lt;uuid&gt; [&lt;prompt&gt;]</text>
+
+    <!-- vertical flows -->
+    <path class="flow" d="M490,102 L490,168"/>
+    <text class="lbl" x="500" y="140">jobs + transcripts</text>
+    <path class="flow" d="M490,228 L490,286"/>
+    <text class="lbl" x="500" y="262">writes claude-code-work</text>
+    <path class="flowT" d="M490,556 L490,622"/>
+    <text class="lblt" x="500" y="595">Open / Send / Draft → :9777</text>
+    <path class="flowT" d="M490,688 L490,722"/>
+    <path class="flowT" d="M490,782 L490,814"/>
+
+    <!-- dashboard <-> kanban api (reads boards / writes goals) -->
+    <path class="flow" d="M455,470 L455,408"/>
+    <text class="lbl" x="250" y="440">reads both boards</text>
+    <path class="flow" d="M525,408 L525,468"/>
+    <text class="lbl" x="540" y="448">writes goals</text>
+
+    <!-- LOOP BACK: warp/claude up to sessions (far right) -->
+    <path class="flowT" d="M650,847 C 820,847 822,65 652,65"/>
+    <text class="lblt" x="700" y="455" transform="rotate(90 700 455)">resumed session continues — loop closes</text>
+
+    <!-- LEFT: human + audio -->
+    <rect class="b" x="40" y="470" width="170" height="86" fill="#13243f" stroke="#60a5fa"/>
+    <text class="t" x="125" y="505" text-anchor="middle">You</text>
+    <text class="ts" x="125" y="524" text-anchor="middle">triage + set goals</text>
+    <text class="ts" x="125" y="539" text-anchor="middle">pick who needs you</text>
+    <path class="flow" d="M210,506 L328,506"/>
+    <text class="lbl" x="222" y="497">view / click</text>
+
+    <rect class="b" x="40" y="610" width="170" height="74" fill="#1c160a" stroke="#fbbf24"/>
+    <text class="t" x="125" y="640" text-anchor="middle" style="fill:#fbbf24">🔊 Audio hooks</text>
+    <text class="ts" x="125" y="659" text-anchor="middle">~/.hermes/hooks</text>
+    <text class="ts" x="125" y="674" text-anchor="middle">sound on needs-you</text>
+    <path class="flowA" d="M125,610 L125,558"/>
+    <text class="lbl" x="135" y="588" style="fill:#fbbf24">alert</text>
+
+    <!-- RIGHT: persistence + obsidian -->
+    <rect class="b" x="752" y="28" width="196" height="86" fill="#0f1a2e" stroke="#34d399"/>
+    <text class="t" x="850" y="55" text-anchor="middle" style="font-size:12.5px;fill:#34d399">persistence</text>
+    <text class="ts" x="850" y="74" text-anchor="middle">CLAUDE_CODE_FORCE_</text>
+    <text class="ts" x="850" y="88" text-anchor="middle">SESSION_PERSISTENCE=1</text>
+    <text class="ts" x="850" y="104" text-anchor="middle">(~/.zshenv) → attachable</text>
+    <path class="flow" d="M752,71 L652,71"/>
+
+    <rect class="b" x="752" y="470" width="196" height="74" fill="#1a1733" stroke="#a78bfa"/>
+    <text class="t" x="850" y="500" text-anchor="middle" style="font-size:13px;fill:#a78bfa">Obsidian vault</text>
+    <text class="ts" x="850" y="519" text-anchor="middle">link-only (never written)</text>
+    <text class="ts" x="850" y="534" text-anchor="middle">obsidian://open?…</text>
+    <path class="flow" d="M650,513 L750,513"/>
+    <text class="lbl" x="662" y="505">Open note</text>
+  </svg>
+  <figcaption>Data flows <b>down the center</b> (agents → mirror → dashboard); actions flow <b>down then back up the right</b> (click → bridge → Warp → the agent resumes). Teal = the act-on-it path.</figcaption>
+  </figure>
+  <div class="legend">
+    <span><i style="background:#101d33;border:1px solid #2dd4bf"></i>this plugin / bridge</span>
+    <span><i style="background:#0f1a2e;border:1px solid #23324d"></i>machine plumbing</span>
+    <span><i style="background:#13243f;border:1px solid #3a4f74"></i>mirror board</span>
+    <span><i style="background:#1a1733;border:1px solid #5b4f8a"></i>human board</span>
+    <span><i style="background:#1c160a;border:1px solid #fbbf24"></i>audio half</span>
+  </div>
+</section>
+
+<section id="components">
+  <h2><span class="n">03</span>The moving parts</h2>
+  <div class="grid cols-2">
+    <div class="card"><h3>Agent sessions</h3><p class="small">Ordinary Claude Code runs, one per repo/task. Each
+      writes a job state file (<code>~/.claude/jobs/&lt;id&gt;/state.json</code>) and a transcript
+      (<code>~/.claude/projects/**/&lt;uuid&gt;.jsonl</code>). These are the source of truth the rest reads.</p></div>
+    <div class="card"><h3>sync_claude_kanban.py</h3><p class="small">A cron job (~60 s, in <code>~/.hermes/scripts</code>)
+      that reads jobs + transcripts and writes the <code>claude-code-work</code> mirror board. It packs each
+      session's signals onto one body line: <code>State · Process · Waiting · Needs</code> + task progress.
+      <strong>This plugin never writes that board.</strong></p></div>
+    <div class="card"><h3>Bundled Kanban API</h3><p class="small">Same-origin REST at
+      <code>:9120/api/plugins/kanban/*</code> over a small DB. The plugin rides this for <em>all</em>
+      persistence — custom plugins can't ship a backend, so there is no server code here.</p></div>
+    <div class="card"><h3>kanban-projects plugin</h3><p class="small">Hand-authored plain JS
+      (<code>dashboard/dist/index.js</code>, hyperscript <code>h()</code>, no build step). Reads both boards via
+      <code>SDK.fetchJSON</code>, joins them by <em>full cwd path</em>, and renders the triage UI.</p></div>
+    <div class="card"><h3>Warp bridge (:9777)</h3><p class="small">A tiny local HTTP server
+      (<code>warp_kanban_bridge.py</code>, symlinked into <code>~/.hermes/scripts</code>). Turns a dashboard
+      click into a real Warp tab running the right <code>claude</code> command. Details below.</p></div>
+    <div class="card"><h3>CUA-driver &amp; Warp</h3><p class="small">The bridge can't type into a terminal via
+      <code>osascript</code> (TCC blocks the detached daemon), so it uses <strong>cua-driver</strong>
+      (Accessibility) to type into Warp, or opens a <code>.command</code> launcher via
+      <code>warp://action/new_tab</code>.</p></div>
+  </div>
+</section>
+
+<section id="data">
+  <h2><span class="n">04</span>Data model — two boards, one join key</h2>
+  <table>
+    <tr><th>Board</th><th>Owner</th><th>What it holds</th></tr>
+    <tr><td><code>claude-code-work</code></td><td>machine (sync script)</td>
+      <td>One card per live/finished agent session — its state, process, waiting flag, task-list progress.</td></tr>
+    <tr><td><code>project-goals</code></td><td>human (this plugin)</td>
+      <td>One card per project — objective, next step, "done when", triage bucket, Obsidian note path.</td></tr>
+  </table>
+  <p>They're joined by a <strong>canonical project key = the full cwd path</strong> (not the basename — basenames
+  collide). The goal card body is markdown so it stays editable in the stock Kanban too:</p>
+  <pre>Path: /Users/sam/Documents/dev/&lt;project&gt;      &larr; the join key, must stay first
+Bucket: now|next|later|blocked|done          &larr; human triage lives HERE, not in status
+Obsidian: [[wiki/projects/&lt;slug&gt;]]
+Note path: wiki/projects/&lt;slug&gt;.md
+**Objective:** …
+**Next:** …
+**Done when:**
+- [ ] …</pre>
+  <div class="callout danger"><strong>🔒 Why the bucket lives in the body, never the status.</strong>
+  The Hermes dispatcher scans every non-archived board each tick and auto-promotes <code>todo→ready</code>;
+  a <code>ready</code>+assigned card gets <em>executed by a worker</em>. So every <code>project-goals</code>
+  card must stay <code>status: triage</code> and unassigned, or a "goal" would silently run as a job.</div>
+</section>
+
+<section id="bridge">
+  <h2><span class="n">05</span>The Warp bridge — how a click becomes a session</h2>
+  <p>The triage strip's buttons are just links to the bridge. Three endpoints:</p>
+  <table>
+    <tr><th>Endpoint</th><th>Button</th><th>Effect</th></tr>
+    <tr><td><code>GET /open/&lt;id&gt;</code></td><td>Open in Warp</td><td>Focus the session's existing Warp tab, or open a fresh one.</td></tr>
+    <tr><td><code>GET /compose/&lt;id&gt;?text=</code></td><td>Draft</td><td>Open + type the text as a <em>draft</em> — Enter withheld, you review &amp; send.</td></tr>
+    <tr><td><code>GET /send/&lt;id&gt;?text=</code></td><td>Send to Claude</td><td>Open + deliver the prompt and submit it.</td></tr>
+  </table>
+
+  <h3>Choosing the right command</h3>
+  <p>An <code>&lt;id&gt;</code> can be a short Agent-View job id or a full session UUID. The bridge resolves it and picks:</p>
+  <table>
+    <tr><th>Session shape</th><th>Command</th></tr>
+    <tr><td>Live Agent-View job</td><td><code>claude attach &lt;short-id&gt;</code></td></tr>
+    <tr><td>Terminal (done/stopped/failed) <em>with</em> a real transcript, or a full interactive UUID</td><td><code>claude --resume &lt;uuid&gt; [&lt;prompt&gt;]</code></td></tr>
+    <tr><td>Failed with no resumable transcript</td><td>fresh <code>claude</code>, seeded with the saved summary</td></tr>
+  </table>
+  <div class="callout"><strong>Prompt delivery without leaks.</strong> A cold send passes the prompt as
+  <code>claude --resume &lt;uuid&gt; "$(cat &lt;file&gt;; rm -f &lt;file&gt;)"</code> — the text rides a short-lived
+  file that the shell reads and deletes inline, so it never lands in shell history and self-cleans. The
+  command runs from a <code>.command</code> launcher (opened via <code>warp://action/new_tab</code>) so
+  keystrokes can't leak into whatever tab is currently frontmost.</div>
+  <p class="small mut">Each launched tab records a focus URL (<code>warp://session/&lt;uuid&gt;</code>) so a later
+  click <em>re-focuses the same tab</em> instead of spawning duplicates.</p>
+</section>
+
+<section id="send">
+  <h2><span class="n">06</span>"Send to Claude", step by step</h2>
+  <ol class="steps">
+    <li>You type a prompt in the triage panel and click <strong>Send</strong> → the browser hits <code>:9777/send/&lt;job&gt;?text=…</code>.</li>
+    <li>The bridge resolves the session and <strong>refuses</strong> only if it's finished with nothing resumable; otherwise it decides <em>attach vs resume vs fresh</em>.</li>
+    <li>For a resumable/full-UUID send it writes the prompt to a temp file, builds <code>claude --resume &lt;uuid&gt; "$(cat f; rm -f f)"</code>, and writes a <code>.command</code> launcher.</li>
+    <li>It opens the launcher with <code>warp://action/new_tab?path=…</code>. The launcher <code>cd</code>s into the session's cwd, records the focus URL, then <code>exec</code>s the resume command.</li>
+    <li>The bridge <strong>waits for the focus record</strong> (proof the tab actually came up) before returning <code>{submitted:true}</code> — a failed launch reports <code>504</code>, never a false success.</li>
+    <li>Claude resumes <em>in the right directory</em>, receives your prompt as its first message, and continues. The loop is closed.</li>
+  </ol>
+</section>
+
+<section id="persist">
+  <h2><span class="n">07</span>Session persistence (so resume even works)</h2>
+  <p>Hermes launches these agents as children, so they inherit <code>CLAUDE_CODE_CHILD_SESSION=1</code>, which
+  normally excludes them from agent-view/background persistence — meaning they couldn't be backgrounded or
+  re-attached. The documented override re-enables it:</p>
+  <pre>export CLAUDE_CODE_FORCE_SESSION_PERSISTENCE=1     # in ~/.zshenv</pre>
+  <p class="small">It lives in <code>~/.zshenv</code> (not <code>.zshrc</code>) because every bridge launch path is a
+  zsh login shell — including the non-interactive <code>zsh -lc</code> — and only <code>.zshenv</code> is read by
+  all of them. Effect: new Hermes sessions persist and show up attachable in Agents view.</p>
+</section>
+
+<section id="rules">
+  <h2><span class="n">08</span>Invariants (don't break these)</h2>
+  <div class="grid cols-3">
+    <div class="card"><h3>UI-only</h3><p class="small">No backend here. All persistence rides the bundled
+      Kanban API via <code>SDK.fetchJSON</code>. Never add <code>plugin_api.py</code>.</p></div>
+    <div class="card"><h3>Goals never dispatchable</h3><p class="small">Create goal cards with
+      <code>{triage:true}</code>; edit with <code>{body}</code>; never set <code>status</code> or an assignee.</p></div>
+    <div class="card"><h3>Ship dist as-is</h3><p class="small">Edit <code>dashboard/dist/index.js</code> directly in
+      hyperscript; keep <code>node --check</code> green. No build step.</p></div>
+    <div class="card"><h3>Don't write the mirror</h3><p class="small"><code>claude-code-work</code> is owned by the
+      sync script. Read it; never write it from here.</p></div>
+    <div class="card"><h3>Obsidian is link-only</h3><p class="small">Render <code>obsidian://</code> links from goal
+      metadata. The plugin never writes the vault.</p></div>
+    <div class="card"><h3>Bounded signal parsing</h3><p class="small">Parse session fields with a
+      <em>bounded</em> regex; a greedy line capture once swallowed the blocked/waiting flags.</p></div>
+  </div>
+</section>
+
+<section id="fixes">
+  <h2><span class="n">09</span>Recent hardening</h2>
+  <p>An <code>xhigh</code> code review of the resume/send path surfaced nine defects; the fixes shipped on
+  <code>main</code>:</p>
+  <ul>
+    <li><strong>Resume-with-prompt delivery</strong> now works for full session UUIDs and terminal-resumable jobs (the prompt rides the self-cleaning temp file).</li>
+    <li><strong>Drafts no longer auto-submit</strong> — baking the prompt into the command is gated on <code>submit</code>.</li>
+    <li><strong>No false "sent"</strong> — the send waits for confirmed focus before reporting success.</li>
+    <li><strong>Leaked prompt files swept</strong>; repeated transcript scans are cached per request.</li>
+    <li><strong>Removed the <code>expect</code> resume-menu wrapper</strong> — running Claude's TUI through an
+      expect pty corrupted the terminal handshake (stray <code>^[P&gt;|Warp…</code> / <code>?62c</code>).
+      Resuming directly is clean; the resume-summary menu is suppressed at the Claude-Code level
+      ("Don't ask again").</li>
+  </ul>
+</section>
+
+<section id="ref">
+  <h2><span class="n">10</span>Quick reference</h2>
+  <div class="grid cols-2">
+    <div class="card"><h3>Ports</h3>
+      <p class="small"><span class="pill port">:9120</span> Hermes dashboard + bundled Kanban API<br>
+      <span class="pill port">:9777</span> Warp bridge (<code>/open</code> · <code>/compose</code> · <code>/send</code> · <code>/health</code>)</p></div>
+    <div class="card"><h3>Key paths</h3>
+      <p class="small">
+      <code>dashboard/dist/index.js</code> — the plugin UI<br>
+      <code>scripts/warp_kanban_bridge.py</code> — the bridge (symlinked to <code>~/.hermes/scripts</code>)<br>
+      <code>~/.hermes/scripts/sync_claude_kanban.py</code> — the mirror writer<br>
+      <code>~/.hermes/hooks</code> — the audio half</p></div>
+    <div class="card"><h3>Dev loop</h3>
+      <p class="small"><code>node --check dashboard/dist/index.js</code><br>
+      <code>cp -r dashboard ~/.hermes/plugins/kanban-projects/</code><br>
+      <code>GET :9120/api/dashboard/plugins/rescan</code><br>
+      view at <code>:9120/kanban-projects</code></p></div>
+    <div class="card"><h3>Bridge health</h3>
+      <p class="small"><code>curl :9777/health</code> →<br>
+      <code>{"ok":true,"service":"warp-kanban-bridge","port":9777}</code></p></div>
+  </div>
+</section>
+
+<footer>
+  kanban-projects · the visual half of a sound&rarr;navigate attention loop ·
+  <span class="mut">github.com/samithaj/hermes-plugin-kanban-projects</span>
+</footer>
+
+</div>
+</body>
+</html>
