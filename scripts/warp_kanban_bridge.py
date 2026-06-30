@@ -69,7 +69,29 @@ CUA_DRIVER = os.environ.get("CUA_DRIVER_BIN", "cua-driver")
 _ID_RE = re.compile(r"^[A-Za-z0-9_-]{4,64}$")
 _FOCUS_URL_RE = re.compile(r"^warp://session/[0-9a-fA-F]{32}$")
 _UUID_RE = re.compile(r"^[0-9a-fA-F]{32}$")
+_SESSION_UUID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
 _INJECT_LOCK = threading.Lock()
+
+# Short-TTL memo for the expensive recursive transcript scans. A single
+# dashboard click resolves the same session id ~8 times (resume-id lookup,
+# transcript check, focus scan, open-command, …), each otherwise doing a
+# recursive `~/.claude/projects/**` glob + transcript read. The TTL is short so
+# session-state changes are still picked up on the next click.
+_SCAN_TTL = 5.0
+_SCAN_CACHE: dict[str, tuple[float, object]] = {}
+_SCAN_LOCK = threading.Lock()
+
+
+def _scan_cached(key: str, compute):
+    now = time.time()
+    with _SCAN_LOCK:
+        hit = _SCAN_CACHE.get(key)
+        if hit is not None and now - hit[0] < _SCAN_TTL:
+            return hit[1]
+    val = compute()
+    with _SCAN_LOCK:
+        _SCAN_CACHE[key] = (now, val)
+    return val
 
 
 def _safe_id(raw: str) -> str | None:
@@ -101,7 +123,65 @@ def _full_session_id(job_id: str) -> str | None:
     except Exception:
         pass
     # job_id may already be a full session id passed straight through.
-    return job_id if "-" in job_id else None
+    return job_id if _SESSION_UUID_RE.match(job_id) else None
+
+
+def _transcript_paths(session_id: str):
+    """Yield Claude transcript files for a full session UUID."""
+    if not _SESSION_UUID_RE.match(session_id):
+        return
+    yield from Path.home().glob(f".claude/projects/**/{session_id}.jsonl")
+
+
+def _transcript_has_real_turns(session_id: str) -> bool:
+    """True when the UUID transcript has non-metadata conversation entries."""
+    return _scan_cached(f"turns:{session_id}", lambda: _compute_transcript_has_real_turns(session_id))
+
+
+def _compute_transcript_has_real_turns(session_id: str) -> bool:
+    for path in _transcript_paths(session_id):
+        try:
+            with path.open(errors="ignore") as fh:
+                for line in fh:
+                    if not line.strip():
+                        continue
+                    try:
+                        typ = json.loads(line).get("type")
+                    except Exception:
+                        return True
+                    if typ not in {"ai-title", "agent-name", "last-prompt", "mode", "permission-mode", "bridge-session"}:
+                        return True
+        except Exception:
+            continue
+    return False
+
+
+def _transcript_cwd(session_id: str) -> str:
+    """Find cwd embedded in a UUID transcript, if any."""
+    return _scan_cached(f"cwd:{session_id}", lambda: _compute_transcript_cwd(session_id))
+
+
+def _compute_transcript_cwd(session_id: str) -> str:
+    for path in _transcript_paths(session_id):
+        try:
+            with path.open(errors="ignore") as fh:
+                for line in fh:
+                    try:
+                        data = json.loads(line)
+                    except Exception:
+                        continue
+                    cwd = data.get("cwd")
+                    if cwd and Path(str(cwd)).is_dir():
+                        return str(cwd)
+                    attachment = data.get("attachment")
+                    if isinstance(attachment, dict):
+                        stdout = str(attachment.get("stdout") or "")
+                        m = re.search(r'\"cwd\":\"([^\"]+)\"', stdout)
+                        if m and Path(m.group(1)).is_dir():
+                            return m.group(1)
+        except Exception:
+            continue
+    return ""
 
 
 def _warp_uuid_alive(uuid: str) -> bool:
@@ -291,7 +371,7 @@ def _existing_focus_url(job_id: str) -> str | None:
 
 
 def _session_cwd(job_id: str) -> str:
-    """Resolve the working directory for a Claude job from its state file."""
+    """Resolve the working directory for a Claude job or full session UUID."""
     state = JOBS_DIR / job_id / "state.json"
     try:
         data = json.loads(state.read_text())
@@ -300,6 +380,11 @@ def _session_cwd(job_id: str) -> str:
             return cwd
     except Exception:
         pass
+    sid = _full_session_id(job_id)
+    if sid:
+        cwd = _transcript_cwd(sid)
+        if cwd:
+            return cwd
     return str(HOME)
 
 
@@ -308,10 +393,13 @@ def _session_name(job_id: str) -> str:
         data = json.loads((JOBS_DIR / job_id / "state.json").read_text())
         return data.get("name") or job_id
     except Exception:
+        cwd = _session_cwd(job_id)
+        if cwd and cwd != str(HOME):
+            return Path(cwd).name
         return job_id
 
 
-def _write_launcher(job_id: str, cwd: str, name: str) -> Path:
+def _write_launcher(job_id: str, cwd: str, name: str, initial_text: str | None = None) -> Path:
     """Write an executable launcher script for this session.
 
     Fired via `warp://action/new_tab?path=<script>` which opens it as a TAB in
@@ -328,7 +416,8 @@ def _write_launcher(job_id: str, cwd: str, name: str) -> Path:
     focus_rec = WARP_SESSIONS_DIR / f"{job_id}.focus"
     fr = shlex_quote(str(focus_rec))
     cwd_q = shlex_quote(cwd)
-    command, _consumed, _post_start_prompt = _claude_open_command(job_id, None)
+    command, _consumed, _post_start_prompt = _claude_open_command(job_id, initial_text)
+    command = _wrap_resume_full_session_choice(command)
     script = (
         "#!/bin/bash\n"
         f"cd {cwd_q} 2>/dev/null || cd \"$HOME\"\n"
@@ -387,6 +476,11 @@ def _session_resume_id(job_id: str) -> str:
         data = json.loads((JOBS_DIR / job_id / "state.json").read_text())
         return str(data.get("resumeSessionId") or data.get("sessionId") or "")
     except Exception:
+        # Dashboard can pass an interactive/full Claude session UUID. There is
+        # no ~/.claude/jobs/<uuid>/state.json for that case; resume the UUID
+        # directly when a real transcript exists.
+        if _SESSION_UUID_RE.match(job_id) and _transcript_has_real_turns(job_id):
+            return job_id
         return ""
 
 
@@ -401,20 +495,7 @@ def _session_has_real_transcript(job_id: str) -> bool:
     resume_id = _session_resume_id(job_id)
     if not resume_id:
         return False
-    for path in Path.home().glob(f".claude/projects/**/{resume_id}.jsonl"):
-        try:
-            for line in path.read_text(errors="ignore").splitlines():
-                if not line.strip():
-                    continue
-                try:
-                    typ = json.loads(line).get("type")
-                except Exception:
-                    return True
-                if typ not in {"ai-title", "agent-name"}:
-                    return True
-        except Exception:
-            continue
-    return False
+    return _transcript_has_real_turns(resume_id)
 
 
 def _session_at_permission_gate(job_id: str) -> bool:
@@ -433,7 +514,7 @@ def _session_at_permission_gate(job_id: str) -> bool:
             capture_output=True, text=True, timeout=15,
         ).stdout
         for e in json.loads(out):
-            if e.get("id") != job_id:
+            if e.get("id") != job_id and e.get("sessionId") != job_id:
                 continue
             wf = str(e.get("waitingFor") or "").lower()
             st = str(e.get("status") or "").lower()
@@ -471,7 +552,12 @@ def _refuse_terminal_session(job_id: str) -> tuple[int, str] | None:
     })
 
 
-def _claude_open_command(job_id: str, initial_text: str | None = None) -> tuple[str, bool, str | None]:
+def _claude_open_command(
+    job_id: str,
+    initial_text: str | None = None,
+    *,
+    bake_resume_prompt: bool = True,
+) -> tuple[str, bool, str | None]:
     """Return (shell_command, consumes_initial_text, post_start_prompt).
 
     Live jobs use `claude attach <short-id>` and receive the dashboard prompt
@@ -480,14 +566,30 @@ def _claude_open_command(job_id: str, initial_text: str | None = None) -> tuple[
     interactive `claude` session and inject the saved summary + dashboard prompt
     after the Claude UI starts. That avoids putting the whole prompt in the
     visible shell command or shell history, and prevents zsh from seeing it.
+
+    `bake_resume_prompt=False` forces a bare `--resume` for resumable sessions
+    even when `initial_text` is given: a DRAFT (compose) must open the session
+    without auto-submitting, so the caller types the text afterwards with Enter
+    withheld. Baking the prompt into `claude --resume <uuid> <prompt>` would run
+    and submit it immediately, which is the opposite of a draft.
     """
     state, detail = _session_terminal_state(job_id)
     resume_id = _session_resume_id(job_id)
+    # Full UUIDs for interactive Claude sessions are not Agent View job ids;
+    # `claude attach <uuid>` fails with "No job matching". Resume them directly.
+    if not state and resume_id == job_id and _SESSION_UUID_RE.match(job_id):
+        prompt = (initial_text or "").strip()
+        if prompt and bake_resume_prompt:
+            return f"{CLAUDE_BIN} --resume {shlex_quote(resume_id)} {_prompt_arg_from_file(prompt, resume_id)}", True, None
+        return f"{CLAUDE_BIN} --resume {shlex_quote(resume_id)}", False, None
     # done/stopped/failed sessions can't be `claude attach`ed ("can't start").
     # Resume them into a live session when there's a real transcript; otherwise
     # start a fresh session seeded with the saved summary.
     terminal = state in ("failed", "done", "stopped")
     if terminal and resume_id and _session_has_real_transcript(job_id):
+        prompt = (initial_text or "").strip()
+        if prompt and bake_resume_prompt:
+            return f"{CLAUDE_BIN} --resume {shlex_quote(resume_id)} {_prompt_arg_from_file(prompt, resume_id)}", True, None
         return f"{CLAUDE_BIN} --resume {shlex_quote(resume_id)}", False, None
     if terminal:
         prompt = (initial_text or "").strip()
@@ -531,30 +633,112 @@ def _cua_key_warp(key: str) -> None:
     _cua_call("press_key", {"pid": _warp_pid(), "key": key}, timeout=20)
 
 
-def _attach_or_resume_cmd(job_id: str) -> str:
-    """Pick the right Warp command for the legacy wrapper fallback.
+def _prompt_arg_from_file(text: str, prefix: str) -> str:
+    """Write prompt text to a short-lived file and return a shell arg that reads it.
 
-    Keep this aligned with `_claude_open_command`: live Agent View jobs attach
-    by short id; terminal jobs with a real transcript resume by full session id;
-    failed metadata-only jobs are not resumable, so start a fresh Claude instead
-    of opening a doomed `--resume` tab.
+    Claude Code requires a prompt argument when resuming some interactive/full
+    UUID sessions. Putting dashboard text directly in the visible Warp command
+    leaks it into shell history; this keeps the visible command direct (`claude
+    --resume ...`) while passing the prompt through a temp file that is removed
+    during shell expansion.
     """
-    state, _detail = _session_terminal_state(job_id)
-    resume_id = _session_resume_id(job_id)
-    if state in ("failed", "done", "stopped"):
-        if resume_id and _session_has_real_transcript(job_id):
-            return f"{CLAUDE_BIN} --resume {shlex_quote(resume_id)}"
-        return CLAUDE_BIN
-    return f"{CLAUDE_BIN} attach {shlex_quote(job_id)}"
+    WARP_SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
+    # Best-effort sweep: the `$(cat …; rm -f …)` arg self-deletes the file on a
+    # successful launch, but a launch that never runs (Warp closed, `open`
+    # failed, expect aborted) would otherwise leave the prompt text on disk
+    # forever. Drop anything older than an hour so leaked prompts can't pile up.
+    cutoff = time.time() - 3600
+    for stale in WARP_SESSIONS_DIR.glob("prompt-*.txt"):
+        try:
+            if stale.stat().st_mtime < cutoff:
+                stale.unlink()
+        except Exception:
+            pass
+    safe_prefix = re.sub(r"[^A-Za-z0-9_.-]", "-", prefix)[:64] or "prompt"
+    path = WARP_SESSIONS_DIR / f"prompt-{safe_prefix}-{int(time.time() * 1000)}.txt"
+    path.write_text(text)
+    try:
+        path.chmod(0o600)
+    except Exception:
+        pass
+    q = shlex_quote(str(path))
+    return f'"$(cat {q}; rm -f {q})"'
 
 
-def _open_warp_new_tab(job_id: str, cwd: str, name: str, initial_text: str | None = None) -> bool:
+def _tcl_dq(s: str) -> str:
+    """Quote a string as a Tcl double-quoted word with NO substitution.
+
+    Tcl performs `$var` and `[cmd]` substitution inside `"..."` exactly as it
+    does for bare words, so a shell command that contains `$(...)` or `$VAR`
+    must have those metacharacters backslash-escaped or Tcl aborts with
+    "can't read ...: no such variable" *before the command is ever spawned*.
+    `json.dumps` escapes `"` and `\\` (JSON rules) but NOT `$`/`[` — that was the
+    bug that broke every resume-with-prompt send. Escape backslash first, then
+    the Tcl specials.
+    """
+    esc = (
+        s.replace("\\", "\\\\")
+        .replace("$", "\\$")
+        .replace("[", "\\[")
+        .replace("]", "\\]")
+        .replace('"', '\\"')
+    )
+    return f'"{esc}"'
+
+
+def _wrap_resume_full_session_choice(command: str) -> str:
+    """Auto-select Claude Code's old/large-session resume option 2.
+
+    Claude sometimes prompts:
+      1. Resume from summary (recommended)
+      2. Resume full session as-is
+      3. Don't ask me again
+
+    Sam wants option 2 always. Use expect so we only send `2<Enter>` if that
+    prompt text appears; otherwise the process falls through to normal
+    interactive mode without injecting stray input.
+    """
+    if " --resume " not in f" {command} ":
+        return command
+    expect_bin = "/usr/bin/expect"
+    if not Path(expect_bin).exists():
+        return command
+    # Build a SINGLE-LINE Tcl program: the CUA open path types this command into
+    # a Warp shell keystroke-by-keystroke, so any embedded newline would submit
+    # early. `;` separates Tcl statements; the `expect {...}` branches are
+    # space-separated. The inner zsh command is wrapped with `_tcl_dq` (not
+    # `json.dumps`) so its `$(cat …; rm -f …)` prompt-file read reaches zsh
+    # instead of being (mis)interpreted by Tcl. `interact` right after answering
+    # the menu hands the tty straight to the user; a short timeout keeps the
+    # no-menu common case from blocking input for 10s.
+    inner = _tcl_dq("exec " + command)
+    tcl = (
+        "set timeout 4 ; "
+        f"spawn -noecho /bin/zsh -lc {inner} ; "
+        "expect { "
+        "-re {Resume full session as-is} { send \"2\\r\" ; interact } "
+        "timeout { interact } "
+        "eof { catch wait result ; exit [lindex $result 3] } "
+        "}"
+    )
+    return f"{expect_bin} -c {shlex_quote(tcl)}"
+
+
+def _open_warp_new_tab(job_id: str, cwd: str, name: str, initial_text: str | None = None,
+                       *, bake_resume_prompt: bool = True) -> bool:
     """Open a fresh Warp tab and start Claude via cua-driver.
 
     No osascript/System Events: CuaDriver owns Accessibility and sends text/key
     events to Warp's pid, avoiding the detached-daemon TCC failure.
     """
-    command, consumed, post_start_prompt = _claude_open_command(job_id, initial_text)
+    command, consumed, post_start_prompt = _claude_open_command(
+        job_id, initial_text, bake_resume_prompt=bake_resume_prompt
+    )
+    # Auto-answer Claude's "Resume full session as-is" menu so a large/old
+    # session resumed here does not hang waiting for a selection. The wrapper is
+    # a no-op for `claude attach …` / fresh `claude` commands (no `--resume`),
+    # and is single-line so it survives being typed keystroke-by-keystroke.
+    command = _wrap_resume_full_session_choice(command)
     subprocess.run(["/usr/bin/open", f"warp://action/new_tab?path={quote(cwd)}"], check=False, timeout=10)
     time.sleep(1.4)
     _cua_type_warp(command)
@@ -569,14 +753,14 @@ def _open_warp_new_tab(job_id: str, cwd: str, name: str, initial_text: str | Non
     return consumed
 
 
-def _open_warp_wrapper_launcher(job_id: str, cwd: str, name: str) -> None:
+def _open_warp_wrapper_launcher(job_id: str, cwd: str, name: str, initial_text: str | None = None) -> None:
     """Open the legacy .command launcher fallback in Warp.
 
     This is for OPENING only. It may attach/resume/start Claude and record a
     focus URL, but the send path must still wait for confirmed Claude focus
     before typing any user text.
     """
-    launcher = _write_launcher(job_id, cwd, name)
+    launcher = _write_launcher(job_id, cwd, name, initial_text=initial_text)
     subprocess.run(
         ["/usr/bin/open", f"warp://action/new_tab?path={quote(str(launcher))}"],
         check=False,
@@ -613,6 +797,25 @@ def _wait_for_focus(job_id: str, deadline_seconds: float = 16.0) -> str | None:
     return None
 
 
+def _resume_prompt_must_be_command_arg(job_id: str) -> bool:
+    """True when a cold send must pass the prompt as `claude --resume <uuid> <prompt>`.
+
+    Full interactive UUIDs and terminal Agent View jobs with real transcripts are
+    not attachable. Running plain `claude --resume <uuid>` exits with "Provide a
+    prompt" on this Claude version, so a cold send has to start the resumed
+    session with the prompt as an argument. That command must be launched via the
+    wrapper file, not frontmost CUA typing, or it can land in an unrelated live
+    Claude tab before the focus guard exists.
+    """
+    state, _detail = _session_terminal_state(job_id)
+    resume_id = _session_resume_id(job_id)
+    if not resume_id or not _session_has_real_transcript(job_id):
+        return False
+    if not state and resume_id == job_id and _SESSION_UUID_RE.match(job_id):
+        return True
+    return state in ("failed", "done", "stopped")
+
+
 def _focus_and_inject(job_id: str, text: str, *, submit: bool) -> tuple[int, str]:
     """Focus/open Warp and send text using cua-driver, never osascript."""
     if not text.strip():
@@ -624,11 +827,43 @@ def _focus_and_inject(job_id: str, text: str, *, submit: bool) -> tuple[int, str
         opened = False
         focus = _existing_focus_url(job_id)
         if not focus:
+            if submit and _resume_prompt_must_be_command_arg(job_id):
+                # For full UUID / terminal resume sends, the prompt has to be
+                # supplied as the initial `claude --resume ... <prompt>` arg. Do
+                # that with the keystroke-free wrapper launcher so CUA never
+                # types a command/prompt into whatever Warp tab is currently
+                # frontmost.
+                try:
+                    _open_warp_wrapper_launcher(job_id, _session_cwd(job_id), _session_name(job_id), initial_text=text)
+                except Exception as exc:
+                    return 500, json.dumps({"ok": False, "job_id": job_id, "error": "failed to open resume wrapper", "detail": str(exc)})
+                # The launcher delivers the prompt as the `claude --resume …
+                # <prompt>` arg at exec time, but `open warp://…` is
+                # fire-and-forget — so confirm the tab actually came up (the
+                # launcher records its focus URL before exec) before telling the
+                # dashboard the message was sent. Otherwise a failed launch (Warp
+                # closed, launcher errored) is silently reported as success.
+                focus = _wait_for_focus(job_id, deadline_seconds=24.0)
+                if not focus:
+                    return 504, json.dumps({
+                        "ok": False, "job_id": job_id, "opened": True, "submitted": False,
+                        "driver": "wrapper-launcher",
+                        "error": "resume launcher fired but Claude never came up — message not confirmed",
+                        "hint": "Open the session in Warp, wait for Claude to attach, then retry Send to Claude.",
+                    })
+                return 200, json.dumps({"ok": True, "job_id": job_id, "submitted": True, "opened": True, "driver": "wrapper-launcher", "mode": "resume-with-prompt"})
             try:
-                consumed = _open_warp_new_tab(job_id, _session_cwd(job_id), _session_name(job_id), initial_text=text)
+                # A draft (submit=False) must NOT bake the prompt into an
+                # auto-running `--resume <uuid> <prompt>` command; open bare and
+                # type the draft below with Enter withheld.
+                consumed = _open_warp_new_tab(
+                    job_id, _session_cwd(job_id), _session_name(job_id),
+                    initial_text=text, bake_resume_prompt=submit,
+                )
                 opened = True
                 if consumed:
-                    return 200, json.dumps({"ok": True, "job_id": job_id, "submitted": submit, "opened": True, "driver": "cua-driver", "mode": "fresh-failed-session"})
+                    mode = "resume-with-prompt" if _session_has_real_transcript(job_id) else "fresh-failed-session"
+                    return 200, json.dumps({"ok": True, "job_id": job_id, "submitted": submit, "opened": True, "driver": "cua-driver", "mode": mode})
             except Exception as exc:
                 # Opening fallback only: use the legacy .command wrapper if CUA
                 # cannot type the direct command. Do NOT type the dashboard text
