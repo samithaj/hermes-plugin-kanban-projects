@@ -417,7 +417,6 @@ def _write_launcher(job_id: str, cwd: str, name: str, initial_text: str | None =
     fr = shlex_quote(str(focus_rec))
     cwd_q = shlex_quote(cwd)
     command, _consumed, _post_start_prompt = _claude_open_command(job_id, initial_text)
-    command = _wrap_resume_full_session_choice(command)
     script = (
         "#!/bin/bash\n"
         f"cd {cwd_q} 2>/dev/null || cd \"$HOME\"\n"
@@ -665,65 +664,6 @@ def _prompt_arg_from_file(text: str, prefix: str) -> str:
     return f'"$(cat {q}; rm -f {q})"'
 
 
-def _tcl_dq(s: str) -> str:
-    """Quote a string as a Tcl double-quoted word with NO substitution.
-
-    Tcl performs `$var` and `[cmd]` substitution inside `"..."` exactly as it
-    does for bare words, so a shell command that contains `$(...)` or `$VAR`
-    must have those metacharacters backslash-escaped or Tcl aborts with
-    "can't read ...: no such variable" *before the command is ever spawned*.
-    `json.dumps` escapes `"` and `\\` (JSON rules) but NOT `$`/`[` — that was the
-    bug that broke every resume-with-prompt send. Escape backslash first, then
-    the Tcl specials.
-    """
-    esc = (
-        s.replace("\\", "\\\\")
-        .replace("$", "\\$")
-        .replace("[", "\\[")
-        .replace("]", "\\]")
-        .replace('"', '\\"')
-    )
-    return f'"{esc}"'
-
-
-def _wrap_resume_full_session_choice(command: str) -> str:
-    """Auto-select Claude Code's old/large-session resume option 2.
-
-    Claude sometimes prompts:
-      1. Resume from summary (recommended)
-      2. Resume full session as-is
-      3. Don't ask me again
-
-    Sam wants option 2 always. Use expect so we only send `2<Enter>` if that
-    prompt text appears; otherwise the process falls through to normal
-    interactive mode without injecting stray input.
-    """
-    if " --resume " not in f" {command} ":
-        return command
-    expect_bin = "/usr/bin/expect"
-    if not Path(expect_bin).exists():
-        return command
-    # Build a SINGLE-LINE Tcl program: the CUA open path types this command into
-    # a Warp shell keystroke-by-keystroke, so any embedded newline would submit
-    # early. `;` separates Tcl statements; the `expect {...}` branches are
-    # space-separated. The inner zsh command is wrapped with `_tcl_dq` (not
-    # `json.dumps`) so its `$(cat …; rm -f …)` prompt-file read reaches zsh
-    # instead of being (mis)interpreted by Tcl. `interact` right after answering
-    # the menu hands the tty straight to the user; a short timeout keeps the
-    # no-menu common case from blocking input for 10s.
-    inner = _tcl_dq("exec " + command)
-    tcl = (
-        "set timeout 4 ; "
-        f"spawn -noecho /bin/zsh -lc {inner} ; "
-        "expect { "
-        "-re {Resume full session as-is} { send \"2\\r\" ; interact } "
-        "timeout { interact } "
-        "eof { catch wait result ; exit [lindex $result 3] } "
-        "}"
-    )
-    return f"{expect_bin} -c {shlex_quote(tcl)}"
-
-
 def _open_warp_new_tab(job_id: str, cwd: str, name: str, initial_text: str | None = None,
                        *, bake_resume_prompt: bool = True) -> bool:
     """Open a fresh Warp tab and start Claude via cua-driver.
@@ -734,11 +674,6 @@ def _open_warp_new_tab(job_id: str, cwd: str, name: str, initial_text: str | Non
     command, consumed, post_start_prompt = _claude_open_command(
         job_id, initial_text, bake_resume_prompt=bake_resume_prompt
     )
-    # Auto-answer Claude's "Resume full session as-is" menu so a large/old
-    # session resumed here does not hang waiting for a selection. The wrapper is
-    # a no-op for `claude attach …` / fresh `claude` commands (no `--resume`),
-    # and is single-line so it survives being typed keystroke-by-keystroke.
-    command = _wrap_resume_full_session_choice(command)
     subprocess.run(["/usr/bin/open", f"warp://action/new_tab?path={quote(cwd)}"], check=False, timeout=10)
     time.sleep(1.4)
     _cua_type_warp(command)
